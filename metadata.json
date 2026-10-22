@@ -1,0 +1,6 @@
+{
+  "name": "Cẩm nang Đọc vị Nền kinh tế | Nguyễn Nam BĐS",
+  "description": "Nhận miễn phí Cẩm nang Đọc vị Nền kinh tế từ Nguyễn Nam BĐS. Hiểu rõ 5 giai đoạn chu kỳ, giải mã 9 nhóm chỉ báo vĩ mô và 4 kênh truyền dẫn đến thị trường BĐS.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
