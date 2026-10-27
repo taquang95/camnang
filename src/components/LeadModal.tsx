@@ -4,7 +4,7 @@ import { X, ArrowRight, ShieldCheck, BookOpen, CheckCircle2 } from 'lucide-react
 interface LeadModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onSubmit: (data: { firstname: string; email: string }) => void;
+  onSubmit: (data: { firstname: string; email: string }) => Promise<void> | void;
 }
 
 export const LeadModal: React.FC<LeadModalProps> = ({ isOpen, onClose, onSubmit }) => {
@@ -15,8 +15,10 @@ export const LeadModal: React.FC<LeadModalProps> = ({ isOpen, onClose, onSubmit 
 
   if (!isOpen) return null;
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
+
     const newErrors: { firstname?: string; email?: string } = {};
 
     if (!firstname.trim()) newErrors.firstname = 'Vui lòng nhập họ và tên của anh/chị';
@@ -32,10 +34,11 @@ export const LeadModal: React.FC<LeadModalProps> = ({ isOpen, onClose, onSubmit 
 
     setErrors({});
     setIsSubmitting(true);
-    setTimeout(() => {
+    try {
+      await onSubmit({ firstname, email });
+    } finally {
       setIsSubmitting(false);
-      onSubmit({ firstname, email });
-    }, 400);
+    }
   };
 
   return (

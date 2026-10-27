@@ -68,20 +68,29 @@ export default function App() {
     };
   }, []);
 
-  const handleFormSubmit = async (data: { firstname: string; email: string }) => {
-    setLeadData({ firstname: data.firstname, email: data.email });
-    
-    // Connect directly with Mautic CRM: crm.nambds.vn Form ID 21
-    await submitLeadToMautic({
-      firstname: data.firstname,
-      email: data.email,
-    });
+  const [isSubmittingGlobal, setIsSubmittingGlobal] = useState(false);
 
-    setIsLeadModalOpen(false);
-    // Transition smoothly to Thank You page
-    setCurrentView('thank-you');
-    window.location.hash = '#/cam-on';
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+  const handleFormSubmit = async (data: { firstname: string; email: string }) => {
+    if (isSubmittingGlobal) return;
+    setIsSubmittingGlobal(true);
+
+    try {
+      setLeadData({ firstname: data.firstname, email: data.email });
+      
+      // Connect directly with Mautic CRM: crm.nambds.vn Form ID 21
+      await submitLeadToMautic({
+        firstname: data.firstname,
+        email: data.email,
+      });
+
+      setIsLeadModalOpen(false);
+      // Transition smoothly to Thank You page
+      setCurrentView('thank-you');
+      window.location.hash = '#/cam-on';
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    } finally {
+      setIsSubmittingGlobal(false);
+    }
   };
 
   const handleBackToHome = () => {

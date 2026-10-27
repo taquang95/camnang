@@ -13,6 +13,7 @@ export interface MauticSubmissionResult {
   message: string;
   formId: number;
   timestamp: string;
+  deduplicated?: boolean;
 }
 
 export const MAUTIC_CONFIG = {
@@ -22,23 +23,75 @@ export const MAUTIC_CONFIG = {
     return `${this.baseUrl}/form/submit?formId=${this.formId}`;
   },
   tag: 'DA_NHAN_QUA_DOC_VI_KINH_TE',
+  // Cooldown window in milliseconds to prevent duplicate submissions
+  cooldownMs: 30000, // 30 seconds
 };
+
+// In-memory mutex map to prevent concurrent duplicate submissions for the same email
+const inFlightPromises = new Map<string, Promise<MauticSubmissionResult>>();
+
+// In-memory timestamp map for client-side cooldown
+const lastSubmittedTimestamps = new Map<string, number>();
 
 /**
  * Submits a contact to Mautic Form ID 21 on crm.nambds.vn.
- * Uses a multi-channel submission strategy:
- * 1. Hidden iframe form POST (official cross-origin Mautic embed method, preserves tracking & cookies, no CORS issues).
- * 2. Background beacon/fetch with no-cors to crm.nambds.vn.
- * 3. Server-side proxy /api/mautic-submit if backend endpoint is accessible.
- * 4. LocalStorage audit trail for offline/debug inspection.
+ *
+ * CRITICAL FIX FOR MULTIPLE EMAILS & CRM OVERLOAD:
+ * 1. Cooldown & Deduplication: Prevents submitting the same email multiple times within 30s.
+ * 2. In-flight Mutex: If a submission is already pending, returns the existing promise.
+ * 3. SINGLE Authoritative Dispatch: Sends exactly ONE request (via API proxy).
+ *    Only falls back to hidden iframe if the API proxy is completely unreachable.
+ *    NEVER executes parallel dispatches.
  */
 export async function submitLeadToMautic(payload: MauticLeadPayload): Promise<MauticSubmissionResult> {
   const cleanFirstname = payload.firstname.trim();
-  const cleanEmail = payload.email.trim();
+  const cleanEmail = payload.email.trim().toLowerCase();
+  const now = Date.now();
   const timestamp = new Date().toISOString();
 
-  // 1. Audit trail in localStorage
+  // 1. Check deduplication cooldown (30 seconds window)
+  const lastTime = lastSubmittedTimestamps.get(cleanEmail) || 0;
+  if (now - lastTime < MAUTIC_CONFIG.cooldownMs) {
+    console.log(`[Mautic] Deduplicated: ${cleanEmail} was submitted ${Math.round((now - lastTime) / 1000)}s ago. Skipping redundant submission.`);
+    return {
+      success: true,
+      message: 'Thông tin của anh/chị đã được tiếp nhận thành công.',
+      formId: MAUTIC_CONFIG.formId,
+      timestamp,
+      deduplicated: true,
+    };
+  }
+
+  // Check localStorage cooldown as well (across tabs)
   try {
+    const storedLastTime = Number(localStorage.getItem(`mautic_submitted_${cleanEmail}`) || '0');
+    if (now - storedLastTime < MAUTIC_CONFIG.cooldownMs) {
+      console.log(`[Mautic] Deduplicated via storage: ${cleanEmail}. Skipping redundant submission.`);
+      return {
+        success: true,
+        message: 'Thông tin của anh/chị đã được tiếp nhận thành công.',
+        formId: MAUTIC_CONFIG.formId,
+        timestamp,
+        deduplicated: true,
+      };
+    }
+  } catch {
+    // Ignore localStorage errors
+  }
+
+  // 2. Check if there is an in-flight submission for this exact email
+  const existingPromise = inFlightPromises.get(cleanEmail);
+  if (existingPromise) {
+    console.log(`[Mautic] Joining in-flight submission for ${cleanEmail}`);
+    return existingPromise;
+  }
+
+  // Mark submission timestamp immediately to prevent race conditions
+  lastSubmittedTimestamps.set(cleanEmail, now);
+  try {
+    localStorage.setItem(`mautic_submitted_${cleanEmail}`, String(now));
+    
+    // Audit log
     const existing = JSON.parse(localStorage.getItem('mautic_submissions_log') || '[]');
     existing.push({
       firstname: cleanFirstname,
@@ -48,104 +101,100 @@ export async function submitLeadToMautic(payload: MauticLeadPayload): Promise<Ma
       tag: MAUTIC_CONFIG.tag,
       timestamp,
     });
-    localStorage.setItem('mautic_submissions_log', JSON.stringify(existing));
+    localStorage.setItem('mautic_submissions_log', JSON.stringify(existing.slice(-20))); // Keep last 20
   } catch {
     // Ignore storage quota or access errors
   }
 
-  // 2. Hidden iframe POST submission to Mautic (standard and most reliable Mautic webform mechanism)
-  if (typeof document !== 'undefined') {
-    try {
-      const iframeId = `mautic_iframe_${Date.now()}`;
-      const iframe = document.createElement('iframe');
-      iframe.id = iframeId;
-      iframe.name = iframeId;
-      iframe.style.display = 'none';
-      iframe.style.width = '0';
-      iframe.style.height = '0';
-      iframe.style.border = 'none';
-      document.body.appendChild(iframe);
+  // 3. Create single execution promise
+  const submissionPromise = (async (): Promise<MauticSubmissionResult> => {
+    let proxySucceeded = false;
 
-      const form = document.createElement('form');
-      form.method = 'POST';
-      form.action = MAUTIC_CONFIG.submitUrl;
-      form.target = iframeId;
-      form.style.display = 'none';
+    // Strategy A: Primary path - Send ONE request via backend/serverless proxy (/api/mautic-submit)
+    if (typeof window !== 'undefined') {
+      try {
+        const response = await fetch('/api/mautic-submit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            firstname: cleanFirstname,
+            email: cleanEmail,
+            formId: MAUTIC_CONFIG.formId,
+          }),
+        });
 
-      // Standard Mautic Form Data fields
-      const fields: Record<string, string> = {
-        'mauticform[formId]': String(MAUTIC_CONFIG.formId),
-        'mauticform[return]': '',
-        'mauticform[firstname]': cleanFirstname,
-        'mauticform[email]': cleanEmail,
-        // Also supply direct aliases in case field alias in Mautic is configured directly
-        'firstname': cleanFirstname,
-        'email': cleanEmail,
-      };
-
-      Object.entries(fields).forEach(([key, val]) => {
-        const input = document.createElement('input');
-        input.type = 'hidden';
-        input.name = key;
-        input.value = val;
-        form.appendChild(input);
-      });
-
-      document.body.appendChild(form);
-      form.submit();
-
-      // Clean up DOM after dispatch
-      setTimeout(() => {
-        if (form.parentNode) form.parentNode.removeChild(form);
-        if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
-      }, 5000);
-    } catch (e) {
-      console.warn('Iframe submission warning:', e);
+        if (response.ok) {
+          proxySucceeded = true;
+          console.log(`[Mautic] Successfully submitted lead via /api/mautic-submit for ${cleanEmail}`);
+        }
+      } catch (err) {
+        console.warn('[Mautic] Backend proxy unreachable, falling back to client-side iframe', err);
+      }
     }
 
-    // 3. Optional direct fetch fallback (no-cors mode)
-    try {
-      const formData = new FormData();
-      formData.append('mauticform[formId]', String(MAUTIC_CONFIG.formId));
-      formData.append('mauticform[firstname]', cleanFirstname);
-      formData.append('mauticform[email]', cleanEmail);
-      formData.append('mauticform[return]', '');
-      formData.append('firstname', cleanFirstname);
-      formData.append('email', cleanEmail);
+    // Strategy B: Fallback ONLY if proxy failed (e.g. running in purely static environment)
+    if (!proxySucceeded && typeof document !== 'undefined') {
+      try {
+        const iframeId = `mautic_iframe_${Date.now()}`;
+        const iframe = document.createElement('iframe');
+        iframe.id = iframeId;
+        iframe.name = iframeId;
+        iframe.style.display = 'none';
+        iframe.style.width = '0';
+        iframe.style.height = '0';
+        iframe.style.border = 'none';
+        document.body.appendChild(iframe);
 
-      fetch(MAUTIC_CONFIG.submitUrl, {
-        method: 'POST',
-        mode: 'no-cors',
-        body: formData,
-      }).catch(() => {
-        // Silently handle network restrictions
-      });
-    } catch {
-      // Ignore
+        const form = document.createElement('form');
+        form.method = 'POST';
+        form.action = MAUTIC_CONFIG.submitUrl;
+        form.target = iframeId;
+        form.style.display = 'none';
+
+        const fields: Record<string, string> = {
+          'mauticform[formId]': String(MAUTIC_CONFIG.formId),
+          'mauticform[return]': '',
+          'mauticform[firstname]': cleanFirstname,
+          'mauticform[email]': cleanEmail,
+          'firstname': cleanFirstname,
+          'email': cleanEmail,
+        };
+
+        Object.entries(fields).forEach(([key, val]) => {
+          const input = document.createElement('input');
+          input.type = 'hidden';
+          input.name = key;
+          input.value = val;
+          form.appendChild(input);
+        });
+
+        document.body.appendChild(form);
+        form.submit();
+
+        setTimeout(() => {
+          if (form.parentNode) form.parentNode.removeChild(form);
+          if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
+        }, 3000);
+      } catch (e) {
+        console.warn('[Mautic] Iframe fallback error:', e);
+      }
     }
 
-    // 4. Try server proxy if available
-    try {
-      fetch('/api/mautic-submit', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          firstname: cleanFirstname,
-          email: cleanEmail,
-          formId: MAUTIC_CONFIG.formId,
-        }),
-      }).catch(() => {
-        // Server proxy optional in dev
-      });
-    } catch {
-      // Ignore
-    }
+    return {
+      success: true,
+      message: 'Thông tin đã được ghi nhận vào Mautic Form ID 21 trên crm.nambds.vn',
+      formId: MAUTIC_CONFIG.formId,
+      timestamp,
+    };
+  })();
+
+  inFlightPromises.set(cleanEmail, submissionPromise);
+
+  try {
+    const result = await submissionPromise;
+    return result;
+  } finally {
+    // Release in-flight lock
+    inFlightPromises.delete(cleanEmail);
   }
-
-  return {
-    success: true,
-    message: 'Thông tin đã được ghi nhận vào Mautic Form ID 21 trên crm.nambds.vn',
-    formId: MAUTIC_CONFIG.formId,
-    timestamp,
-  };
 }

@@ -4,7 +4,7 @@ import { ECONOMIC_STAGES, AUTHOR_AVATAR_URL } from '../utils/economicData.ts';
 import { EconomicStageId } from '../types/index.ts';
 
 interface HeroProps {
-  onFormSubmit: (data: { firstname: string; email: string }) => void;
+  onFormSubmit: (data: { firstname: string; email: string }) => Promise<void> | void;
   onSelectStage: (stageId: EconomicStageId) => void;
 }
 
@@ -15,8 +15,10 @@ export const Hero: React.FC<HeroProps> = ({ onFormSubmit, onSelectStage }) => {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [activeCyclePoint, setActiveCyclePoint] = useState<EconomicStageId>('recovery');
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
+
     const newErrors: { firstname?: string; email?: string } = {};
 
     if (!firstname.trim()) {
@@ -35,10 +37,11 @@ export const Hero: React.FC<HeroProps> = ({ onFormSubmit, onSelectStage }) => {
 
     setErrors({});
     setIsSubmitting(true);
-    setTimeout(() => {
+    try {
+      await onFormSubmit({ firstname, email });
+    } finally {
       setIsSubmitting(false);
-      onFormSubmit({ firstname, email });
-    }, 450);
+    }
   };
 
   const handlePointClick = (stageId: EconomicStageId) => {

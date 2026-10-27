@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { ArrowRight, CheckCircle2, ShieldCheck, Sparkles, BookOpen } from 'lucide-react';
 
 interface FinalCtaSectionProps {
-  onFormSubmit: (data: { firstname: string; email: string }) => void;
+  onFormSubmit: (data: { firstname: string; email: string }) => Promise<void> | void;
 }
 
 export const FinalCtaSection: React.FC<FinalCtaSectionProps> = ({ onFormSubmit }) => {
@@ -11,8 +11,10 @@ export const FinalCtaSection: React.FC<FinalCtaSectionProps> = ({ onFormSubmit }
   const [errors, setErrors] = useState<{ firstname?: string; email?: string }>({});
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
+
     const newErrors: { firstname?: string; email?: string } = {};
 
     if (!firstname.trim()) {
@@ -31,10 +33,11 @@ export const FinalCtaSection: React.FC<FinalCtaSectionProps> = ({ onFormSubmit }
 
     setErrors({});
     setIsSubmitting(true);
-    setTimeout(() => {
+    try {
+      await onFormSubmit({ firstname, email });
+    } finally {
       setIsSubmitting(false);
-      onFormSubmit({ firstname, email });
-    }, 400);
+    }
   };
 
   return (
