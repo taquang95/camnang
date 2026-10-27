@@ -61,17 +61,17 @@ export default async function handler(req: any, res: any) {
     const mauticUrl = `https://crm.nambds.vn/form/submit?formId=${formId}`;
     const params = new URLSearchParams();
     params.append('mauticform[formId]', String(formId));
+    params.append('mauticform[formName]', 'bieumaudocvinenkinhtebanhang');
     params.append('mauticform[firstname]', cleanFirstname);
     params.append('mauticform[email]', cleanEmail);
+    params.append('mauticform[submit]', '1');
     params.append('mauticform[return]', '');
-    params.append('firstname', cleanFirstname);
-    params.append('email', cleanEmail);
 
     const clientIp = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req.socket?.remoteAddress || '';
 
-    // Exactly ONE fetch call with a 5s timeout to prevent server hanging
+    // Set 15s timeout since Mautic synchronously connects to SMTP on form submit (takes ~5-6s)
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 6000);
+    const timeoutId = setTimeout(() => controller.abort(), 15000);
 
     const response = await fetch(mauticUrl, {
       method: 'POST',
