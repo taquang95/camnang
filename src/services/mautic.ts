@@ -35,20 +35,18 @@ const inFlightPromises = new Map<string, Promise<MauticSubmissionResult>>();
 const lastSubmittedTimestamps = new Map<string, number>();
 
 /**
- * Submits a contact to Mautic Form ID 21 on crm.nambds.vn.
+ * Submits a contact directly to Mautic Form ID 21 on crm.nambds.vn.
  *
- * CRITICAL DEFENSE-IN-DEPTH ARCHITECTURE:
- * 1. Multi-layer Deduplication:
+ * PURE CLIENT-SIDE EMBEDDED FORM DISPATCH:
+ * 1. Single stream only: Directly from visitor's browser to crm.nambds.vn Form ID 21.
+ * 2. Streams from 127.0.0.1 (local server) and cloud server (/api/mautic-submit) are completely disabled.
+ * 3. Preserves visitor's real client IP, headers, and Mautic tracking cookies.
+ * 4. Multi-layer Deduplication:
  *    - In-flight mutex (blocks parallel simultaneous clicks)
  *    - In-memory 60s cooldown
  *    - SessionStorage 60s cooldown
  *    - LocalStorage 60s cooldown (across browser tabs)
- * 2. Guaranteed SINGLE dispatch:
- *    - Tries backend/Vercel serverless proxy (/api/mautic-submit) with 15s timeout
- *    - ONLY if the proxy endpoint returns a genuine 404/network unreachable (e.g. pure static hosting),
- *      it executes the hidden iframe POST.
- *    - Never executes both.
- * 3. Exact field mapping matching Mautic Form ID 21 schema:
+ * 5. Exact schema matching Mautic Form ID 21:
  *    - mauticform[formId] = 21
  *    - mauticform[formName] = bieumaudocvinenkinhtebanhang
  *    - mauticform[firstname] = <Ho va ten>
@@ -65,7 +63,7 @@ export async function submitLeadToMautic(payload: MauticLeadPayload): Promise<Ma
   // 1. Check in-memory deduplication cooldown (60 seconds)
   const lastTime = lastSubmittedTimestamps.get(cleanEmail) || 0;
   if (now - lastTime < MAUTIC_CONFIG.cooldownMs) {
-    console.log(`[Mautic] Deduplicated in-memory: ${cleanEmail} was submitted ${Math.round((now - lastTime) / 1000)}s ago. Skipping redundant submission.`);
+    console.log(`[Mautic Client Form] Deduplicated in-memory: ${cleanEmail} was submitted ${Math.round((now - lastTime) / 1000)}s ago. Skipping.`);
     return {
       success: true,
       message: 'Thông tin của anh/chị đã được tiếp nhận thành công.',
@@ -75,12 +73,12 @@ export async function submitLeadToMautic(payload: MauticLeadPayload): Promise<Ma
     };
   }
 
-  // 2. Check sessionStorage & localStorage cooldown
+  // 2. Check sessionStorage & localStorage cooldown (60 seconds)
   try {
     if (typeof sessionStorage !== 'undefined') {
       const sessionTime = Number(sessionStorage.getItem(`mautic_submitted_${cleanEmail}`) || '0');
       if (now - sessionTime < MAUTIC_CONFIG.cooldownMs) {
-        console.log(`[Mautic] Deduplicated via sessionStorage: ${cleanEmail}. Skipping duplicate.`);
+        console.log(`[Mautic Client Form] Deduplicated via sessionStorage: ${cleanEmail}. Skipping duplicate.`);
         return {
           success: true,
           message: 'Thông tin của anh/chị đã được tiếp nhận thành công.',
@@ -94,7 +92,7 @@ export async function submitLeadToMautic(payload: MauticLeadPayload): Promise<Ma
     if (typeof localStorage !== 'undefined') {
       const storedLastTime = Number(localStorage.getItem(`mautic_submitted_${cleanEmail}`) || '0');
       if (now - storedLastTime < MAUTIC_CONFIG.cooldownMs) {
-        console.log(`[Mautic] Deduplicated via localStorage: ${cleanEmail}. Skipping duplicate.`);
+        console.log(`[Mautic Client Form] Deduplicated via localStorage: ${cleanEmail}. Skipping duplicate.`);
         return {
           success: true,
           message: 'Thông tin của anh/chị đã được tiếp nhận thành công.',
@@ -111,7 +109,7 @@ export async function submitLeadToMautic(payload: MauticLeadPayload): Promise<Ma
   // 3. Check if there is an in-flight submission for this exact email
   const existingPromise = inFlightPromises.get(cleanEmail);
   if (existingPromise) {
-    console.log(`[Mautic] Joining in-flight submission for ${cleanEmail}`);
+    console.log(`[Mautic Client Form] Joining in-flight submission for ${cleanEmail}`);
     return existingPromise;
   }
 
@@ -139,66 +137,29 @@ export async function submitLeadToMautic(payload: MauticLeadPayload): Promise<Ma
     // Ignore storage quota or access errors
   }
 
-  // 4. Create single execution promise
+  // 4. Create single execution promise directly via client-side Mautic form submit
   const submissionPromise = (async (): Promise<MauticSubmissionResult> => {
-    let proxyAttemptedAndCompleted = false;
-
-    // Strategy A: Primary path - Send ONE request via backend/serverless proxy (/api/mautic-submit)
-    if (typeof window !== 'undefined') {
+    if (typeof document !== 'undefined') {
       try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 16000);
-
-        const response = await fetch('/api/mautic-submit', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            firstname: cleanFirstname,
-            email: cleanEmail,
-            formId: MAUTIC_CONFIG.formId,
-          }),
-          signal: controller.signal,
-        }).finally(() => {
-          clearTimeout(timeoutId);
-        });
-
-        // If the proxy endpoint answered (200, 302, etc.), consider it completed
-        if (response.ok || response.status === 200 || response.status === 204) {
-          proxyAttemptedAndCompleted = true;
-          console.log(`[Mautic] Successfully dispatched lead via /api/mautic-submit for ${cleanEmail}`);
-        } else if (response.status !== 404 && response.status !== 405) {
-          // If status is 500 or other, the server already received the request, do NOT retry via iframe
-          proxyAttemptedAndCompleted = true;
-          console.warn(`[Mautic] Backend proxy returned status ${response.status}, not retrying to avoid duplicate email.`);
-        }
-      } catch (err: any) {
-        // Only if it's an offline network error or abort, we log
-        console.warn('[Mautic] Backend proxy request notice:', err?.message || err);
-        // If aborted after 16s, the server was already processing, do not fire a second request!
-        if (err?.name === 'AbortError') {
-          proxyAttemptedAndCompleted = true;
-        }
-      }
-    }
-
-    // Strategy B: Fallback ONLY if proxy endpoint is completely non-existent (e.g. running on pure static CDN)
-    if (!proxyAttemptedAndCompleted && typeof document !== 'undefined') {
-      try {
-        console.log(`[Mautic] Submitting lead via native form iframe fallback for ${cleanEmail}`);
-        const iframeId = `mautic_iframe_${Date.now()}`;
+        console.log(`[Mautic Client Form] Submitting lead directly to ${MAUTIC_CONFIG.baseUrl} for ${cleanEmail}`);
+        
+        const iframeName = `mautic_lead_frame_${Date.now()}`;
         const iframe = document.createElement('iframe');
-        iframe.id = iframeId;
-        iframe.name = iframeId;
-        iframe.style.display = 'none';
-        iframe.style.width = '0';
-        iframe.style.height = '0';
-        iframe.style.border = 'none';
+        iframe.name = iframeName;
+        iframe.style.position = 'absolute';
+        iframe.style.top = '-9999px';
+        iframe.style.left = '-9999px';
+        iframe.style.width = '1px';
+        iframe.style.height = '1px';
+        iframe.style.opacity = '0';
+        iframe.style.pointerEvents = 'none';
+        iframe.setAttribute('aria-hidden', 'true');
         document.body.appendChild(iframe);
 
         const form = document.createElement('form');
         form.method = 'POST';
         form.action = MAUTIC_CONFIG.submitUrl;
-        form.target = iframeId;
+        form.target = iframeName;
         form.style.display = 'none';
 
         // Exact Mautic Form 21 schema fields
@@ -222,12 +183,13 @@ export async function submitLeadToMautic(payload: MauticLeadPayload): Promise<Ma
         document.body.appendChild(form);
         form.submit();
 
+        // Clean up DOM elements after submission has propagated
         setTimeout(() => {
           if (form.parentNode) form.parentNode.removeChild(form);
           if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
-        }, 4000);
+        }, 5000);
       } catch (e) {
-        console.warn('[Mautic] Iframe fallback error:', e);
+        console.warn('[Mautic Client Form] Direct form dispatch error:', e);
       }
     }
 
